@@ -1,1 +1,6 @@
-
+As stated in the simulation study protocol (under review, preprint available at https://doi.org/10.64898/2026.06.24.2635648), parameters used for the simulations are pre-specified here before the simulations are run. 
+As the configuration of the parameter sets is not straightforward and matter of discussions, so far we can only publish the parameter configurations for the majority but not all of the scenarios. Those are: 
+- latent brownian motion (LBM) data generating mechanism (DGM) resembling ACTT1 and ACTT2 control group configurations, as well as treatment effects of time alive and out of hospital (TAOOH) difference between groups of 0, 0.75, 1.25, and 2 days until day 28 tuned by one single parameter (mu_treatment_effect). 
+With these parameters, the simulations are then extended to 60 day follow-up. The majority of scenarios can be run with this information available. Further parameter states (see Supplement of the protocol) will be pre-specified in this repository for
+- ordinal markov process (OMP) and piecewise exponential recurrent events with individual frailty terms (PEF) for null and one alternative hypothesis (2-day TAOOH difference) in ACTT1 and ACTT2-like configurations
+- 3 configurations making use of a more flexible configuration of treatment effects in LBM to mimic more closely the treatment group metrics reported for ACTT1, ACTT2, and COV-BARRIER trials. 

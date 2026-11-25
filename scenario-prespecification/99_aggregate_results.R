@@ -8,6 +8,25 @@ library(gt)
 
 results_root <- here::here("scenario-prespecification")
 
+# Record the markov.misc version used (current commit of the local repo)
+if (FALSE) {
+  markov_misc_commit <- system2(
+    "git",
+    c(
+      "-C",
+      shQuote(path.expand("~/github/markov.misc")),
+      "log",
+      "-1",
+      "--format=%h"
+    ),
+    stdout = TRUE
+  )
+  if (length(markov_misc_commit) == 0L) markov_misc_commit <- "unknown"
+}
+# Hardcoded stable commit at time of publication: 8b64521
+markov_misc_commit <- "8b64521"
+
+
 bundle_files <- list.files(
   results_root,
   pattern = "^parameters_chosen_models.*\\.rds$",
@@ -31,70 +50,189 @@ names(targets_files) <- gsub(
 )
 
 if (length(bundle_files) == 0L) {
-  stop("No mbo_result_bundle_*.rds files found under MBO_scenarios/results/.")
+  stop(
+    "No parameters_chosen_models*.rds files found under scenario-prespecification/."
+  )
 }
 
 bundle_data <- purrr::map(bundle_files, readRDS)
 targets <- purrr::map(targets_files, readRDS)
 
 
-# 1. Summary of parameters chosen for the control group and the final treatment effect for each target treatment effect size.
-# Find unique parameter sets (ctrl group parameters are the same for difffernt mu_treatment_effect values)
-DGMs <- c("LBM", "OMP", "PEF")
-scenarios_sets <- setNames(c("ACTT1", "ACTT2"), c("ACTT1", "ACTT2"))
-
-parameters_DGM_df <- list()
-for (dgm in DGMs) {
-  DGM_parameters <- bundle_data[
-    grepl(dgm, names(bundle_data)) & !grepl("taooh", names(bundle_data))
-  ]
-  if (length(DGM_parameters) == 0L) {
-    warning(paste0("No parameter sets found for DGM ", dgm, "."))
-    parameters_DGM_df[[dgm]] <- rep(NULL, times = 3)
-    next
-  }
-  ctrl_parameter_sets <- purrr::map(
-    DGM_parameters,
-    function(x) {
-      params <- x[[1]]
-      params$drift_start <- paste0(
-        "rpois(",
-        round(environment(params$drift_start)$lambda, 4),
-        ")"
-      )
-      unlist(lapply(params, function(x) {
-        paste0(if (is.numeric(x)) round(x, 4) else x, collapse = ", ")
-      }))
-    }
+# Parse file names: parameters_chosen_models_<scenario>_<DGM|control>_...
+parse_name <- function(nm) {
+  parts <- strsplit(sub("^parameters_(chosen_models|targets)_", "", nm), "_")
+  data.frame(
+    name = nm,
+    scenario = vapply(parts, `[`, "", 1),
+    dgm = vapply(
+      parts,
+      function(x) setdiff(x[-1], c("control", "taooh", "final"))[1],
+      ""
+    ),
+    is_control = vapply(
+      parts,
+      function(x) x[2] == "control" || x[3] == "control",
+      NA
+    ),
+    target_taooh = vapply(
+      parts,
+      function(x) {
+        if ("taooh" %in% x) x[which(x == "taooh") + 1] else NA_character_
+      },
+      ""
+    )
   )
-
-  parameters_DGM_df[[dgm]] <- as.data.frame(do.call(
-    cbind,
-    ctrl_parameter_sets
-  ))
 }
 
-parameter_table <- do.call(rbind, parameters_DGM_df)
-parameter_table <- cbind(
-  Parameter = rownames(parameter_table),
-  parameter_table
+# Collapse any parameter value to a single display string
+format_value <- function(x) {
+  if (is.null(x)) {
+    return("NULL")
+  }
+  if (is.function(x)) {
+    lambda <- environment(x)$lambda
+    return(
+      if (is.null(lambda)) {
+        "function"
+      } else {
+        paste0("rpois(", signif(lambda, 6), ")")
+      }
+    )
+  }
+  if (is.list(x)) {
+    return(paste(vapply(x, format_value, ""), collapse = "; "))
+  }
+  paste0(if (is.numeric(x)) signif(x, 6) else format(x), collapse = ", ")
+}
+
+# Fields that are not parameters of the DGM (metadata), or are free to choose (e.g. n_patients)
+drop_fields <- c(
+  "merged_fit",
+  "created",
+  "r_version",
+  "rms_version",
+  "n_patients",
+  "state2_day14",
+  "actt2_thresholds",
+  "mortality_day28",
+  "n"
 )
-names(parameter_table) <- c("Parameter", scenarios_sets)
-markov.misc_commit <- setNames(
-  as.data.frame(as.list(c(
-    "markov.misc_commit:f9bfe57",
-    rep(NA, length(scenarios_sets))
-  ))),
-  names(parameter_table)
+
+flatten_params <- function(params) {
+  params <- params[setdiff(names(params), drop_fields)]
+  vapply(params, format_value, "")
+}
+
+# Treatment-effect field(s) per DGM, and their value in the null scenario
+treatment_fields <- list(
+  LBM = "mu_treatment_effect",
+  PEF = "hazard_ratio",
+  OMP = c("tx_coef", "trt_coef")
 )
-parameter_table <- rbind(
-  parameter_table,
-  markov.misc_commit
+null_values <- c(LBM = 0, PEF = 1, OMP = 0)
+effect_field <- c(
+  LBM = "mu_treatment_effect",
+  PEF = "hazard_ratio",
+  OMP = "trt_coef"
 )
-parameter_table |> View()
+
+file_info <- parse_name(names(bundle_data))
+
+# Every bundle should have a "parameters" element. Control bundles still
+# holding candidates are flagged; their first candidate is used for the checks.
+get_parameters <- function(nm) {
+  x <- bundle_data[[nm]]
+  if (!is.null(x$parameters)) {
+    return(x$parameters)
+  }
+  warning(
+    nm,
+    ": no 'parameters' element; found candidate(s) ",
+    paste(names(x), collapse = ", "),
+    if (length(x) > 1L) ". Several candidates: using the first.",
+    call. = FALSE
+  )
+  x[[1]]
+}
+all_parameters <- setNames(
+  lapply(file_info$name, get_parameters),
+  file_info$name
+)
+
+# Parameters without treatment-effect fields and metadata, as comparable strings
+comparable <- function(params, dgm) {
+  params <- params[setdiff(
+    names(params),
+    c(drop_fields, treatment_fields[[dgm]])
+  )]
+  vapply(params, format_value, "")
+}
+
+differences <- function(a, b) {
+  fields <- union(names(a), names(b))
+  fields[
+    vapply(fields, function(f) !identical(a[f], b[f]), NA) |
+      !(fields %in% names(a)) |
+      !(fields %in% names(b))
+  ]
+}
+
+# Checks: (1) scenarios differing only by taooh share all non-treatment
+# parameters, (2) control bundles match the corresponding final bundles.
+for (scen in unique(file_info$scenario)) {
+  for (dgm in unique(file_info$dgm)) {
+    grp <- file_info[file_info$scenario == scen & file_info$dgm == dgm, ]
+    if (nrow(grp) < 2L) {
+      next
+    }
+    ref <- comparable(all_parameters[[grp$name[1]]], dgm)
+    for (nm in grp$name[-1]) {
+      diff_fields <- differences(ref, comparable(all_parameters[[nm]], dgm))
+      if (length(diff_fields) > 0L) {
+        warning(
+          scen,
+          " ",
+          dgm,
+          ": ",
+          nm,
+          " differs from ",
+          grp$name[1],
+          " in: ",
+          paste(diff_fields, collapse = ", "),
+          call. = FALSE
+        )
+      }
+    }
+  }
+}
+
+# 1. One parameter set per trial and DGM, taken from the final (taooh) bundles
+# with the treatment-effect parameters removed.
+final_info <- file_info[!file_info$is_control, ]
+final_info <- final_info[!duplicated(final_info[c("scenario", "dgm")]), ]
+
+parameter_long <- purrr::pmap_dfr(
+  final_info,
+  function(name, scenario, dgm, ...) {
+    p <- comparable(all_parameters[[name]], dgm)
+    data.frame(
+      DGM = dgm,
+      Parameter = names(p),
+      scenario = scenario,
+      Value = unname(p)
+    )
+  }
+)
+
+parameter_table <- parameter_long |>
+  tidyr::pivot_wider(names_from = scenario, values_from = Value) |>
+  dplyr::arrange(factor(DGM, levels = c("LBM", "PEF", "OMP")))
 
 parameter_table |>
-  gt() |>
+  gt(groupname_col = "DGM", rowname_col = "Parameter") |>
+  sub_missing(missing_text = "") |>
+  tab_source_note(paste0("markov.misc commit: ", markov_misc_commit)) |>
   gtsave(
     filename = here(
       "scenario-prespecification",
@@ -102,74 +240,38 @@ parameter_table |>
     )
   )
 
-treatment_effect_params <- list()
-for (dgm in DGMs) {
-  treatment_effect_params[[dgm]] <- purrr::map_dfr(
-    scenarios_sets,
-    function(scenario) {
-      treatment_effect_param_data <- bundle_data[
-        grepl(dgm, names(bundle_data)) &
-          grepl("taooh", names(bundle_data)) &
-          grepl(scenario, names(bundle_data))
-      ]
-      if (length(treatment_effect_param_data) == 0L) {
-        warning(paste0(
-          "No treatment effect parameter sets found for DGM ",
-          dgm,
-          " and scenario ",
-          scenario,
-          "."
-        ))
-        return(data.frame(
-          DGM = dgm,
-          scenario = NA,
-          target_taooh = NA,
-          mu_treatment_effect = NA
-        ))
-      }
-
-      scenario_treatment_effects <- purrr::map(
-        treatment_effect_param_data,
-        function(x) {
-          if (dgm == "LBM") {
-            round(x$parameters$mu_treatment_effect, 4)
-          }
-        }
+# 2. Treatment effect parameter: one row per scenario, incl. the null scenario
+treatment_effect_params <- purrr::pmap_dfr(
+  final_info[c("scenario", "dgm")],
+  function(scenario, dgm) {
+    grp <- file_info[
+      file_info$scenario == scenario &
+        file_info$dgm == dgm &
+        !file_info$is_control,
+    ]
+    data.frame(
+      DGM = dgm,
+      Trial = scenario,
+      Scenario = c("null", paste0("taooh_", grp$target_taooh)),
+      Parameter = effect_field[[dgm]],
+      Value = c(
+        null_values[[dgm]],
+        vapply(
+          grp$name,
+          USE.NAMES = FALSE,
+          function(nm) {
+            round(all_parameters[[nm]][[effect_field[[dgm]]]], 4)
+          },
+          0
+        )
       )
-      names <- strsplit(names(treatment_effect_param_data), "_")
-      trt_effect_df <- data.frame(
-        DGM = dgm,
-        scenario = unlist(lapply(names, function(x) x[4])),
-        target_taooh = unlist(lapply(names, function(x) x[7])),
-        mu_treatment_effect = unlist(scenario_treatment_effects)
-      )
-      trt_effect_df
-    }
-  )
-
-  # if (dgm == "LBM") {
-  #   for (i in scenarios_sets) {
-  #     ctrl_parameter_sets[grepl(
-  #       i,
-  #       names(ctrl_parameter_sets)
-  #     )][[1]]["mu_treatment_effect"] <- paste0(
-  #       c(
-  #         ctrl_parameter_sets[grepl(
-  #           i,
-  #           names(ctrl_parameter_sets)
-  #         )][[1]]["mu_treatment_effect"],
-  #         treatment_effect_params[[i]]
-  #       ),
-  #       collapse = ", "
-  #     )
-  #   }
-  # }
-}
-
-gt(do.call(rbind, treatment_effect_params)) |>
-  gtsave(
-    filename = here(
-      "scenario-prespecification",
-      "parameters_targets.html"
     )
+  }
+) |>
+  dplyr::arrange(factor(DGM, levels = c("LBM", "PEF", "OMP")), Trial)
+
+treatment_effect_params |>
+  gt(groupname_col = "DGM") |>
+  gtsave(
+    filename = here("scenario-prespecification", "parameters_targets.html")
   )

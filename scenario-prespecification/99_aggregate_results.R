@@ -273,5 +273,8 @@ treatment_effect_params <- purrr::pmap_dfr(
 treatment_effect_params |>
   gt(groupname_col = "DGM") |>
   gtsave(
-    filename = here("scenario-prespecification", "parameters_targets.html")
+    filename = here(
+      "scenario-prespecification",
+      "parameters_treatment_effects.html"
+    )
   )
